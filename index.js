@@ -8,7 +8,12 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+// ডাটাবেস কানেকশন আপডেট করা হয়েছে (IPv4 ফোর্সিং এবং SSL যুক্ত)
+const pool = new Pool({ 
+    connectionString: process.env.DATABASE_URL, 
+    ssl: { rejectUnauthorized: false },
+    family: 4 
+});
 
 // SMS Gateway Integration
 const sendSMS = (number, message) => {
@@ -55,7 +60,7 @@ app.post('/api/auth/register-step1', async (req, res) => {
     let fullPhone = '+88' + cleanPhone;
     try {
         const exist = await pool.query('SELECT * FROM master_admins WHERE phone = $1 OR phone = $2', [phone, fullPhone]);
-        if (exist.rows.length > 0) return res.status(400).json({ error: 'এই নম্বর দিয়ে ইতিমধ্যেই অ্যাকাউন্ট রয়েছে!' });
+        if (exist.rows.length > 0) return res.status(400).json({ error: 'এই নম্বর দিয়ে ইতিমধ্যেই অ্যাকাউন্ট রয়েছে!' });
         const otp = Math.floor(1000 + Math.random() * 9000).toString();
         otpStore.set(fullPhone, otp);
         sendSMS(fullPhone, `Your Garments ERP OTP is ${otp}`);
@@ -99,7 +104,7 @@ app.post('/api/auth/login-step1', async (req, res) => {
             sendSMS(fullPhone, `Your Garments ERP OTP is ${otp}`);
             return res.json({ success: true, requiresOtp: true });
         }
-        res.status(404).json({ error: 'অ্যাকাউন্ট পাওয়া যায়নি।' });
+        res.status(404).json({ error: 'অ্যাকাউন্ট পাওয়া যায়নি।' });
     } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); }
 });
 
@@ -114,21 +119,19 @@ app.post('/api/auth/verify-login', async (req, res) => {
         if (cleanPhone === '01773444222' || cleanPhone === '0177344442') return res.json({ success: true, role: 'super_admin', data: { id: 0, name: 'Super Admin', phone: fullPhone } });
         let adminRes = await pool.query(`SELECT m.*, s.shop_name FROM master_admins m LEFT JOIN shops s ON m.id = s.master_admin_id WHERE m.phone = $1 OR m.phone = $2`, [phone, fullPhone]);
         if (adminRes.rows.length > 0) return res.json({ success: true, role: 'master_admin', data: adminRes.rows[0] });
-        res.status(404).json({ error: 'অ্যাকাউন্ট পাওয়া যায়নি।' });
+        res.status(404).json({ error: 'অ্যাকাউন্ট পাওয়া যায়নি।' });
     } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); }
 });
 
 // Super Admin APIs
 app.get('/api/superadmin/admins', async (req, res) => { try { const result = await pool.query(`SELECT m.*, s.shop_name FROM master_admins m LEFT JOIN shops s ON m.id = s.master_admin_id ORDER BY m.id DESC`); res.json({ success: true, data: result.rows }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.put('/api/superadmin/update-admin/:id', async (req, res) => { try { await pool.query("UPDATE master_admins SET subscription_status = $1, package_name = $2 WHERE id = $3", [req.body.subscription_status, req.body.package_name, req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
-
-// Safe Delete (Will fail safely if data exists)
 app.delete('/api/superadmin/delete-admin/:id', async (req, res) => {
     try {
         await pool.query('DELETE FROM master_admins WHERE id = $1', [req.params.id]);
         res.json({ success: true });
     } catch (err) { 
-        res.status(500).json({ error: 'এই দোকানের অধীনে ডাটা থাকায় ডিলিট করা সম্ভব নয়। আগে ডাটা ক্লিয়ার করুন।' }); 
+        res.status(500).json({ error: 'এই দোকানের অধীনে ডাটা থাকায় ডিলিট করা সম্ভব নয়। আগে ডাটা ক্লিয়ার করুন।' }); 
     }
 });
 
@@ -152,7 +155,7 @@ app.post('/api/masteradmin/request-package', async (req, res) => { try { await p
 app.post('/api/masteradmin/create-user', async (req, res) => { try { await pool.query('INSERT INTO users (name, phone, master_admin_id) VALUES ($1, $2, $3)', [req.body.name, req.body.phone, req.body.master_admin_id]); res.status(201).json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.get('/api/masteradmin/users/:admin_id', async (req, res) => { try { const result = await pool.query('SELECT * FROM users WHERE master_admin_id::TEXT = $1::TEXT ORDER BY id DESC', [req.params.admin_id]); res.json({ success: true, data: result.rows }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.put('/api/masteradmin/users/:id', async (req, res) => { try { await pool.query('UPDATE users SET name = $1, phone = $2 WHERE id = $3', [req.body.name, req.body.phone, req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
-app.delete('/api/masteradmin/users/:id', async (req, res) => { try { await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'এই ইউজারের অধীনে ডাটা রয়েছে, ডিলিট সম্ভব নয়।' }); } });
+app.delete('/api/masteradmin/users/:id', async (req, res) => { try { await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'এই ইউজারের অধীনে ডাটা রয়েছে, ডিলিট সম্ভব নয়।' }); } });
 
 // Categories API
 app.post('/api/masteradmin/categories', async (req, res) => { try { const result = await pool.query("INSERT INTO cutting_categories (master_admin_id, category_name, sizes) VALUES ($1, $2, $3) RETURNING *", [String(req.body.master_admin_id), req.body.category_name, JSON.stringify(req.body.sizes)]); res.status(201).json({ success: true, data: result.rows[0] }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
