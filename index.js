@@ -36,14 +36,12 @@ pool.connect(async (err, client, release) => {
     else {
         console.log('Successfully connected to DB!');
         try {
-            // 🛑 ফিক্স ১: ডাটাবেসে টেবিল না থাকলে অটোমেটিক তৈরি করার ব্যবস্থা করা হয়েছে (রেজিস্ট্রেশন এরর ফিক্স)
             await client.query(`CREATE TABLE IF NOT EXISTS master_admins (id SERIAL PRIMARY KEY, name VARCHAR(255), phone VARCHAR(50), status VARCHAR(50), subscription_status VARCHAR(50), package_name VARCHAR(255), expire_date TIMESTAMP, pending_package VARCHAR(255), pending_trx_id VARCHAR(255))`);
             await client.query(`CREATE TABLE IF NOT EXISTS shops (id SERIAL PRIMARY KEY, master_admin_id INT, shop_name VARCHAR(255), location VARCHAR(255))`);
             await client.query(`CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, master_admin_id INT, name VARCHAR(255), phone VARCHAR(50))`);
             await client.query(`CREATE TABLE IF NOT EXISTS cutting_lists (id SERIAL PRIMARY KEY, user_id VARCHAR(255), master_admin_id VARCHAR(255), product_code VARCHAR(255), category_name VARCHAR(255), raw_text TEXT, extra_note TEXT, table_data JSONB, fabric_image TEXT, status VARCHAR(50), edit_count INT DEFAULT 0, sewing_start_time TIMESTAMP, sewing_end_time TIMESTAMP, overtime_hours INT DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
             await client.query(`CREATE TABLE IF NOT EXISTS cutting_categories (id SERIAL PRIMARY KEY, master_admin_id TEXT, category_name VARCHAR(255), sizes JSONB, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
             
-            // কলাম আপডেট
             await client.query("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS expire_date TIMESTAMP");
             await client.query("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS pending_package VARCHAR(255)");
             await client.query("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS pending_trx_id VARCHAR(255)");
@@ -85,7 +83,6 @@ app.post('/api/auth/register-verify', async (req, res) => {
     if (storedOtp !== otp && otp !== '0000') return res.status(400).json({ error: 'ভুল ওটিপি (OTP)!' });
     otpStore.delete(fullPhone);
     
-    // 🛑 ফিক্স: ট্রানজেকশন এরর হ্যান্ডেলিং উন্নত করা হয়েছে
     try {
         await pool.query('BEGIN');
         const adminRes = await pool.query("INSERT INTO master_admins (name, phone, status, subscription_status, package_name, expire_date) VALUES ($1, $2, 'Approved', 'Trial', '3 Days Free Trial', NOW() + INTERVAL '3 days') RETURNING *", [name, fullPhone]);
@@ -94,7 +91,6 @@ app.post('/api/auth/register-verify', async (req, res) => {
         res.status(201).json({ success: true });
     } catch (err) { 
         await pool.query('ROLLBACK'); 
-        console.error("Registration failed:", err);
         res.status(500).json({ error: 'সার্ভার এরর: ডাটা সেভ করা যায়নি!' }); 
     }
 });
@@ -140,7 +136,9 @@ app.post('/api/auth/verify-login', async (req, res) => {
 
 // Super Admin APIs
 app.get('/api/superadmin/admins', async (req, res) => { try { const result = await pool.query(`SELECT m.*, s.shop_name FROM master_admins m LEFT JOIN shops s ON m.id = s.master_admin_id ORDER BY m.id DESC`); res.json({ success: true, data: result.rows }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
+
 app.put('/api/superadmin/update-admin/:id', async (req, res) => { try { await pool.query("UPDATE master_admins SET subscription_status = $1, package_name = $2 WHERE id = $3", [req.body.subscription_status, req.body.package_name, req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
+
 app.delete('/api/superadmin/delete-admin/:id', async (req, res) => {
     try {
         await pool.query('DELETE FROM master_admins WHERE id = $1', [req.params.id]);
@@ -148,28 +146,27 @@ app.delete('/api/superadmin/delete-admin/:id', async (req, res) => {
     } catch (err) { res.status(500).json({ error: 'এই দোকানের অধীনে ডাটা থাকায় ডিলিট করা সম্ভব নয়। আগে ডাটা ক্লিয়ার করুন।' }); }
 });
 
-// 🛑 ফিক্স ২: প্যাকেজ অ্যাপ্রুভ করার টাইপ এরর ফিক্স করা হয়েছে (PostgreSQL Type Casting Error Resolved)
+// 🛑 ফিক্স ১: সুপার এডমিন প্যানেল থেকে প্যাকেজ অ্যাপ্রুভ করার সম্পূর্ণ অপ্টিমাইজড ও বাগ-ফ্রি কোড
 app.put('/api/superadmin/approve-package/:id', async (req, res) => {
     try {
         const { package_name } = req.body;
-        let days = 30;
+        let days = 30; // Default 1 Month
         if(package_name && package_name.includes('3 Months')) days = 90;
         if(package_name && package_name.includes('6 Months')) days = 180;
         if(package_name && package_name.includes('1 Year')) days = 365;
         
-        // NOW() কে TIMESTAMP এ কাস্ট করা হয়েছে যাতে expire_date এর সাথে ক্যালকুলেট হতে পারে
         const query = `
             UPDATE master_admins 
             SET 
                 subscription_status = 'Active', 
                 package_name = $1, 
-                expire_date = GREATEST(COALESCE(expire_date, NOW()::TIMESTAMP), NOW()::TIMESTAMP) + ($2 || ' days')::interval, 
+                expire_date = GREATEST(COALESCE(expire_date, NOW()::TIMESTAMP), NOW()::TIMESTAMP) + INTERVAL '${days} days', 
                 pending_package = NULL, 
                 pending_trx_id = NULL 
-            WHERE id = $3
+            WHERE id = $2
         `;
         
-        await pool.query(query, [package_name, days, req.params.id]);
+        await pool.query(query, [package_name, req.params.id]);
         res.json({ success: true });
     } catch (e) { 
         console.error("Package Approval Error:", e);
