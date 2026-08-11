@@ -38,6 +38,8 @@ pool.connect(async (err, client, release) => {
         try {
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'Cutting'");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS product_code VARCHAR(255) DEFAULT 'N/A'");
+            // 🛑 ক্যাটাগরি সেভ করার জন্য নতুন কলাম
+            await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS category_name VARCHAR(255) DEFAULT 'N/A'");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS master_admin_id TEXT");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS extra_note TEXT DEFAULT ''");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS edit_count INT DEFAULT 0");
@@ -164,36 +166,51 @@ app.get('/api/categories/:master_admin_id', async (req, res) => { try { const re
 app.delete('/api/masteradmin/categories/:id', async (req, res) => { try { await pool.query('DELETE FROM cutting_categories WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 
 // ==========================================
-// Cutting Workflow API (Speed Updated with LIMIT 40)
+// Cutting Workflow API (Speed & Category Updated)
 // ==========================================
-app.post('/api/user/add-cutting-list', async (req, res) => { try { let userRes = await pool.query('SELECT master_admin_id FROM users WHERE id::TEXT = $1::TEXT', [req.body.user_id]); let masterId = userRes.rows.length > 0 ? userRes.rows[0].master_admin_id : null; await pool.query("INSERT INTO cutting_lists (user_id, master_admin_id, product_code, raw_text, table_data, fabric_image, status, edit_count) VALUES ($1, $2, $3, $4, $5, $6, 'Cutting', 0)", [String(req.body.user_id), String(masterId || ''), String(req.body.product_code), String(req.body.raw_text), JSON.stringify(req.body.table_data), String(req.body.fabric_image)]); res.status(201).json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর!' }); } });
+app.post('/api/user/add-cutting-list', async (req, res) => { 
+    try { 
+        let userRes = await pool.query('SELECT master_admin_id FROM users WHERE id::TEXT = $1::TEXT', [req.body.user_id]); 
+        let masterId = userRes.rows.length > 0 ? userRes.rows[0].master_admin_id : null; 
+        
+        // 🛑 category_name ডাটাবেসে সেভ করা হচ্ছে
+        await pool.query("INSERT INTO cutting_lists (user_id, master_admin_id, product_code, category_name, raw_text, table_data, fabric_image, status, edit_count) VALUES ($1, $2, $3, $4, $5, $6, $7, 'Cutting', 0)", 
+        [String(req.body.user_id), String(masterId || ''), String(req.body.product_code), String(req.body.category_name || 'N/A'), String(req.body.raw_text), JSON.stringify(req.body.table_data), String(req.body.fabric_image)]); 
+        
+        res.status(201).json({ success: true }); 
+    } catch (err) { 
+        res.status(500).json({ error: 'সার্ভার এরর!' }); 
+    } 
+});
 
-app.put('/api/user/update-cutting-list/:id', async (req, res) => { const { product_code, raw_text, table_data, fabric_image, role } = req.body; try { const check = await pool.query("SELECT edit_count FROM cutting_lists WHERE id = $1", [req.params.id]); let currentCount = check.rows[0].edit_count || 0; if (role === 'user' && currentCount >= 2) return res.status(400).json({ error: 'আপনি সর্বোচ্চ ২ বার আপডেট করতে পারবেন!' }); let newCount = role === 'user' ? currentCount + 1 : currentCount; await pool.query("UPDATE cutting_lists SET product_code = $1, raw_text = $2, table_data = $3, fabric_image = $4, edit_count = $5 WHERE id = $6", [String(product_code), String(raw_text), JSON.stringify(table_data), String(fabric_image), newCount, req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
+app.put('/api/user/update-cutting-list/:id', async (req, res) => { 
+    const { product_code, category_name, raw_text, table_data, fabric_image, role } = req.body; 
+    try { 
+        const check = await pool.query("SELECT edit_count FROM cutting_lists WHERE id = $1", [req.params.id]); 
+        let currentCount = check.rows[0].edit_count || 0; 
+        if (role === 'user' && currentCount >= 2) return res.status(400).json({ error: 'আপনি সর্বোচ্চ ২ বার আপডেট করতে পারবেন!' }); 
+        let newCount = role === 'user' ? currentCount + 1 : currentCount; 
+        
+        // 🛑 আপডেট করার সময় category_name আপডেট করা হচ্ছে
+        await pool.query("UPDATE cutting_lists SET product_code = $1, category_name = $2, raw_text = $3, table_data = $4, fabric_image = $5, edit_count = $6 WHERE id = $7", 
+        [String(product_code), String(category_name || 'N/A'), String(raw_text), JSON.stringify(table_data), String(fabric_image), newCount, req.params.id]); 
+        
+        res.json({ success: true }); 
+    } catch (err) { 
+        res.status(500).json({ error: 'সার্ভার এরর' }); 
+    } 
+});
 
 app.get('/api/cutting-lists/:id/:role', async (req, res) => { 
     try { 
         let query = '';
         let params = [];
-        
-        // LIMIT 40 যুক্ত করা হয়েছে যাতে অ্যাপ দ্রুত লোড হয়
         if (req.params.role === 'super_admin') {
-            query = `
-                SELECT c.*, u.name AS cutting_master_name 
-                FROM cutting_lists c 
-                LEFT JOIN users u ON c.user_id = u.id::TEXT 
-                ORDER BY c.id DESC LIMIT 40
-            `;
+            query = `SELECT c.*, u.name AS cutting_master_name FROM cutting_lists c LEFT JOIN users u ON c.user_id = u.id::TEXT ORDER BY c.id DESC LIMIT 40`;
         } else {
-            query = `
-                SELECT c.*, u.name AS cutting_master_name 
-                FROM cutting_lists c 
-                LEFT JOIN users u ON c.user_id = u.id::TEXT 
-                WHERE c.master_admin_id::TEXT = $1::TEXT 
-                ORDER BY c.id DESC LIMIT 40
-            `;
+            query = `SELECT c.*, u.name AS cutting_master_name FROM cutting_lists c LEFT JOIN users u ON c.user_id = u.id::TEXT WHERE c.master_admin_id::TEXT = $1::TEXT ORDER BY c.id DESC LIMIT 40`;
             params = [req.params.id];
         }
-        
         const result = await pool.query(query, params); 
         res.json({ success: true, data: result.rows }); 
     } catch (err) { 
