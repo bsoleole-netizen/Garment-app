@@ -8,7 +8,7 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// ডাটাবেস কানেকশন আপডেট করা হয়েছে (IPv4 ফোর্সিং এবং SSL যুক্ত)
+// ডাটাবেস কানেকশন (IPv4 ফোর্সিং এবং SSL যুক্ত)
 const pool = new Pool({ 
     connectionString: process.env.DATABASE_URL, 
     ssl: { rejectUnauthorized: false },
@@ -164,7 +164,7 @@ app.get('/api/categories/:master_admin_id', async (req, res) => { try { const re
 app.delete('/api/masteradmin/categories/:id', async (req, res) => { try { await pool.query('DELETE FROM cutting_categories WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 
 // ==========================================
-// 🛑 আপডেট করা API: Cutting Workflow API
+// Cutting Workflow API (Speed Updated with LIMIT 40)
 // ==========================================
 app.post('/api/user/add-cutting-list', async (req, res) => { try { let userRes = await pool.query('SELECT master_admin_id FROM users WHERE id::TEXT = $1::TEXT', [req.body.user_id]); let masterId = userRes.rows.length > 0 ? userRes.rows[0].master_admin_id : null; await pool.query("INSERT INTO cutting_lists (user_id, master_admin_id, product_code, raw_text, table_data, fabric_image, status, edit_count) VALUES ($1, $2, $3, $4, $5, $6, 'Cutting', 0)", [String(req.body.user_id), String(masterId || ''), String(req.body.product_code), String(req.body.raw_text), JSON.stringify(req.body.table_data), String(req.body.fabric_image)]); res.status(201).json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর!' }); } });
 
@@ -175,21 +175,21 @@ app.get('/api/cutting-lists/:id/:role', async (req, res) => {
         let query = '';
         let params = [];
         
+        // LIMIT 40 যুক্ত করা হয়েছে যাতে অ্যাপ দ্রুত লোড হয়
         if (req.params.role === 'super_admin') {
             query = `
                 SELECT c.*, u.name AS cutting_master_name 
                 FROM cutting_lists c 
                 LEFT JOIN users u ON c.user_id = u.id::TEXT 
-                ORDER BY c.id DESC
+                ORDER BY c.id DESC LIMIT 40
             `;
         } else {
-            // মাস্টার এডমিন বা সাধারণ ইউজার উভয়েই master_admin_id দিয়ে ফিল্টার হবে, ফলে সবাই সবারটা দেখবে
             query = `
                 SELECT c.*, u.name AS cutting_master_name 
                 FROM cutting_lists c 
                 LEFT JOIN users u ON c.user_id = u.id::TEXT 
                 WHERE c.master_admin_id::TEXT = $1::TEXT 
-                ORDER BY c.id DESC
+                ORDER BY c.id DESC LIMIT 40
             `;
             params = [req.params.id];
         }
