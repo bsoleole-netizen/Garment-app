@@ -8,7 +8,7 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
-// ডাটাবেস কানেকশন আপডেট করা হয়েছে (IPv4 ফোর্সিং এবং SSL যুক্ত)
+// ডাটাবেস কানেকশন আপডেট করা হয়েছে (IPv4 ফোর্সিং এবং SSL যুক্ত)
 const pool = new Pool({ 
     connectionString: process.env.DATABASE_URL, 
     ssl: { rejectUnauthorized: false },
@@ -163,10 +163,44 @@ app.put('/api/masteradmin/categories/:id', async (req, res) => { try { await poo
 app.get('/api/categories/:master_admin_id', async (req, res) => { try { const result = await pool.query('SELECT * FROM cutting_categories WHERE master_admin_id::TEXT = $1::TEXT ORDER BY id DESC', [req.params.master_admin_id]); res.json({ success: true, data: result.rows }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.delete('/api/masteradmin/categories/:id', async (req, res) => { try { await pool.query('DELETE FROM cutting_categories WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 
-// Cutting Workflow API
+// ==========================================
+// 🛑 আপডেট করা API: Cutting Workflow API
+// ==========================================
 app.post('/api/user/add-cutting-list', async (req, res) => { try { let userRes = await pool.query('SELECT master_admin_id FROM users WHERE id::TEXT = $1::TEXT', [req.body.user_id]); let masterId = userRes.rows.length > 0 ? userRes.rows[0].master_admin_id : null; await pool.query("INSERT INTO cutting_lists (user_id, master_admin_id, product_code, raw_text, table_data, fabric_image, status, edit_count) VALUES ($1, $2, $3, $4, $5, $6, 'Cutting', 0)", [String(req.body.user_id), String(masterId || ''), String(req.body.product_code), String(req.body.raw_text), JSON.stringify(req.body.table_data), String(req.body.fabric_image)]); res.status(201).json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর!' }); } });
+
 app.put('/api/user/update-cutting-list/:id', async (req, res) => { const { product_code, raw_text, table_data, fabric_image, role } = req.body; try { const check = await pool.query("SELECT edit_count FROM cutting_lists WHERE id = $1", [req.params.id]); let currentCount = check.rows[0].edit_count || 0; if (role === 'user' && currentCount >= 2) return res.status(400).json({ error: 'আপনি সর্বোচ্চ ২ বার আপডেট করতে পারবেন!' }); let newCount = role === 'user' ? currentCount + 1 : currentCount; await pool.query("UPDATE cutting_lists SET product_code = $1, raw_text = $2, table_data = $3, fabric_image = $4, edit_count = $5 WHERE id = $6", [String(product_code), String(raw_text), JSON.stringify(table_data), String(fabric_image), newCount, req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
-app.get('/api/cutting-lists/:id/:role', async (req, res) => { try { let query = req.params.role === 'super_admin' ? 'SELECT * FROM cutting_lists ORDER BY id DESC' : req.params.role === 'master_admin' ? 'SELECT * FROM cutting_lists WHERE master_admin_id::TEXT = $1::TEXT ORDER BY id DESC' : 'SELECT * FROM cutting_lists WHERE user_id::TEXT = $1::TEXT ORDER BY id DESC'; const result = await pool.query(query, req.params.role === 'super_admin' ? [] : [req.params.id]); res.json({ success: true, data: result.rows }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
+
+app.get('/api/cutting-lists/:id/:role', async (req, res) => { 
+    try { 
+        let query = '';
+        let params = [];
+        
+        if (req.params.role === 'super_admin') {
+            query = `
+                SELECT c.*, u.name AS cutting_master_name 
+                FROM cutting_lists c 
+                LEFT JOIN users u ON c.user_id = u.id::TEXT 
+                ORDER BY c.id DESC
+            `;
+        } else {
+            // মাস্টার এডমিন বা সাধারণ ইউজার উভয়েই master_admin_id দিয়ে ফিল্টার হবে, ফলে সবাই সবারটা দেখবে
+            query = `
+                SELECT c.*, u.name AS cutting_master_name 
+                FROM cutting_lists c 
+                LEFT JOIN users u ON c.user_id = u.id::TEXT 
+                WHERE c.master_admin_id::TEXT = $1::TEXT 
+                ORDER BY c.id DESC
+            `;
+            params = [req.params.id];
+        }
+        
+        const result = await pool.query(query, params); 
+        res.json({ success: true, data: result.rows }); 
+    } catch (err) { 
+        res.status(500).json({ error: 'সার্ভার এরর' }); 
+    } 
+});
+
 app.delete('/api/cutting-lists/:id', async (req, res) => { try { await pool.query('DELETE FROM cutting_lists WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.post('/api/cutting-lists/update-status', async (req, res) => { const { list_id, status } = req.body; try { if(status === 'Sewing Processing') { await pool.query("UPDATE cutting_lists SET status = $1, sewing_start_time = NOW() WHERE id = $2", [status, list_id]); } else if (status === 'Sewing Complete') { await pool.query("UPDATE cutting_lists SET status = $1, sewing_end_time = NOW() WHERE id = $2", [status, list_id]); } else { await pool.query("UPDATE cutting_lists SET status = $1 WHERE id = $2", [status, list_id]); } res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.post('/api/cutting-lists/add-overtime', async (req, res) => { try { await pool.query("UPDATE cutting_lists SET overtime_hours = COALESCE(overtime_hours, 0) + $1 WHERE id = $2", [parseInt(req.body.hours) || 0, req.body.list_id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
