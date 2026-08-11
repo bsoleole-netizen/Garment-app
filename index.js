@@ -36,20 +36,27 @@ pool.connect(async (err, client, release) => {
     else {
         console.log('Successfully connected to DB!');
         try {
+            // 🛑 ফিক্স ১: ডাটাবেসে টেবিল না থাকলে অটোমেটিক তৈরি করার ব্যবস্থা করা হয়েছে (রেজিস্ট্রেশন এরর ফিক্স)
+            await client.query(`CREATE TABLE IF NOT EXISTS master_admins (id SERIAL PRIMARY KEY, name VARCHAR(255), phone VARCHAR(50), status VARCHAR(50), subscription_status VARCHAR(50), package_name VARCHAR(255), expire_date TIMESTAMP, pending_package VARCHAR(255), pending_trx_id VARCHAR(255))`);
+            await client.query(`CREATE TABLE IF NOT EXISTS shops (id SERIAL PRIMARY KEY, master_admin_id INT, shop_name VARCHAR(255), location VARCHAR(255))`);
+            await client.query(`CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, master_admin_id INT, name VARCHAR(255), phone VARCHAR(50))`);
+            await client.query(`CREATE TABLE IF NOT EXISTS cutting_lists (id SERIAL PRIMARY KEY, user_id VARCHAR(255), master_admin_id VARCHAR(255), product_code VARCHAR(255), category_name VARCHAR(255), raw_text TEXT, extra_note TEXT, table_data JSONB, fabric_image TEXT, status VARCHAR(50), edit_count INT DEFAULT 0, sewing_start_time TIMESTAMP, sewing_end_time TIMESTAMP, overtime_hours INT DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+            await client.query(`CREATE TABLE IF NOT EXISTS cutting_categories (id SERIAL PRIMARY KEY, master_admin_id TEXT, category_name VARCHAR(255), sizes JSONB, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+            
+            // কলাম আপডেট
+            await client.query("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS expire_date TIMESTAMP");
+            await client.query("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS pending_package VARCHAR(255)");
+            await client.query("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS pending_trx_id VARCHAR(255)");
+            
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'Cutting'");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS product_code VARCHAR(255) DEFAULT 'N/A'");
-            // 🛑 ক্যাটাগরি সেভ করার জন্য নতুন কলাম
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS category_name VARCHAR(255) DEFAULT 'N/A'");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS master_admin_id TEXT");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS extra_note TEXT DEFAULT ''");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS edit_count INT DEFAULT 0");
-            await client.query("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS expire_date TIMESTAMP");
-            await client.query("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS pending_package VARCHAR(255)");
-            await client.query("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS pending_trx_id VARCHAR(255)");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS sewing_start_time TIMESTAMP");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS sewing_end_time TIMESTAMP");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS overtime_hours INT DEFAULT 0");
-            await client.query(`CREATE TABLE IF NOT EXISTS cutting_categories (id SERIAL PRIMARY KEY, master_admin_id TEXT, category_name VARCHAR(255), sizes JSONB, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
         } catch (e) { console.log("Schema update note:", e.message); }
         release();
     }
@@ -77,13 +84,19 @@ app.post('/api/auth/register-verify', async (req, res) => {
     const storedOtp = otpStore.get(fullPhone);
     if (storedOtp !== otp && otp !== '0000') return res.status(400).json({ error: 'ভুল ওটিপি (OTP)!' });
     otpStore.delete(fullPhone);
+    
+    // 🛑 ফিক্স: ট্রানজেকশন এরর হ্যান্ডেলিং উন্নত করা হয়েছে
     try {
         await pool.query('BEGIN');
         const adminRes = await pool.query("INSERT INTO master_admins (name, phone, status, subscription_status, package_name, expire_date) VALUES ($1, $2, 'Approved', 'Trial', '3 Days Free Trial', NOW() + INTERVAL '3 days') RETURNING *", [name, fullPhone]);
         await pool.query('INSERT INTO shops (master_admin_id, shop_name, location) VALUES ($1, $2, $3)', [adminRes.rows[0].id, shop_name, location || '']);
         await pool.query('COMMIT');
         res.status(201).json({ success: true });
-    } catch (err) { await pool.query('ROLLBACK'); res.status(500).json({ error: 'সার্ভার এরর' }); }
+    } catch (err) { 
+        await pool.query('ROLLBACK'); 
+        console.error("Registration failed:", err);
+        res.status(500).json({ error: 'সার্ভার এরর: ডাটা সেভ করা যায়নি!' }); 
+    }
 });
 
 app.post('/api/auth/login-step1', async (req, res) => {
@@ -132,21 +145,36 @@ app.delete('/api/superadmin/delete-admin/:id', async (req, res) => {
     try {
         await pool.query('DELETE FROM master_admins WHERE id = $1', [req.params.id]);
         res.json({ success: true });
-    } catch (err) { 
-        res.status(500).json({ error: 'এই দোকানের অধীনে ডাটা থাকায় ডিলিট করা সম্ভব নয়। আগে ডাটা ক্লিয়ার করুন।' }); 
-    }
+    } catch (err) { res.status(500).json({ error: 'এই দোকানের অধীনে ডাটা থাকায় ডিলিট করা সম্ভব নয়। আগে ডাটা ক্লিয়ার করুন।' }); }
 });
 
+// 🛑 ফিক্স ২: প্যাকেজ অ্যাপ্রুভ করার টাইপ এরর ফিক্স করা হয়েছে (PostgreSQL Type Casting Error Resolved)
 app.put('/api/superadmin/approve-package/:id', async (req, res) => {
     try {
         const { package_name } = req.body;
         let days = 30;
-        if(package_name.includes('3 Months')) days = 90;
-        if(package_name.includes('6 Months')) days = 180;
-        if(package_name.includes('1 Year')) days = 365;
-        await pool.query(`UPDATE master_admins SET subscription_status = 'Active', package_name = $1, expire_date = GREATEST(COALESCE(expire_date, NOW()), NOW()) + INTERVAL '${days} days', pending_package = NULL, pending_trx_id = NULL WHERE id = $2`, [package_name, req.params.id]);
+        if(package_name && package_name.includes('3 Months')) days = 90;
+        if(package_name && package_name.includes('6 Months')) days = 180;
+        if(package_name && package_name.includes('1 Year')) days = 365;
+        
+        // NOW() কে TIMESTAMP এ কাস্ট করা হয়েছে যাতে expire_date এর সাথে ক্যালকুলেট হতে পারে
+        const query = `
+            UPDATE master_admins 
+            SET 
+                subscription_status = 'Active', 
+                package_name = $1, 
+                expire_date = GREATEST(COALESCE(expire_date, NOW()::TIMESTAMP), NOW()::TIMESTAMP) + ($2 || ' days')::interval, 
+                pending_package = NULL, 
+                pending_trx_id = NULL 
+            WHERE id = $3
+        `;
+        
+        await pool.query(query, [package_name, days, req.params.id]);
         res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: 'সার্ভার এরর' }); }
+    } catch (e) { 
+        console.error("Package Approval Error:", e);
+        res.status(500).json({ error: 'সার্ভার এরর: প্যাকেজ অ্যাপ্রুভ করা যায়নি!' }); 
+    }
 });
 
 // Shop / Profile / Packages
@@ -165,15 +193,12 @@ app.put('/api/masteradmin/categories/:id', async (req, res) => { try { await poo
 app.get('/api/categories/:master_admin_id', async (req, res) => { try { const result = await pool.query('SELECT * FROM cutting_categories WHERE master_admin_id::TEXT = $1::TEXT ORDER BY id DESC', [req.params.master_admin_id]); res.json({ success: true, data: result.rows }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.delete('/api/masteradmin/categories/:id', async (req, res) => { try { await pool.query('DELETE FROM cutting_categories WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 
-// ==========================================
-// Cutting Workflow API (Speed & Category Updated)
-// ==========================================
+// Cutting Workflow API
 app.post('/api/user/add-cutting-list', async (req, res) => { 
     try { 
         let userRes = await pool.query('SELECT master_admin_id FROM users WHERE id::TEXT = $1::TEXT', [req.body.user_id]); 
         let masterId = userRes.rows.length > 0 ? userRes.rows[0].master_admin_id : null; 
         
-        // 🛑 category_name ডাটাবেসে সেভ করা হচ্ছে
         await pool.query("INSERT INTO cutting_lists (user_id, master_admin_id, product_code, category_name, raw_text, table_data, fabric_image, status, edit_count) VALUES ($1, $2, $3, $4, $5, $6, $7, 'Cutting', 0)", 
         [String(req.body.user_id), String(masterId || ''), String(req.body.product_code), String(req.body.category_name || 'N/A'), String(req.body.raw_text), JSON.stringify(req.body.table_data), String(req.body.fabric_image)]); 
         
@@ -191,14 +216,11 @@ app.put('/api/user/update-cutting-list/:id', async (req, res) => {
         if (role === 'user' && currentCount >= 2) return res.status(400).json({ error: 'আপনি সর্বোচ্চ ২ বার আপডেট করতে পারবেন!' }); 
         let newCount = role === 'user' ? currentCount + 1 : currentCount; 
         
-        // 🛑 আপডেট করার সময় category_name আপডেট করা হচ্ছে
         await pool.query("UPDATE cutting_lists SET product_code = $1, category_name = $2, raw_text = $3, table_data = $4, fabric_image = $5, edit_count = $6 WHERE id = $7", 
         [String(product_code), String(category_name || 'N/A'), String(raw_text), JSON.stringify(table_data), String(fabric_image), newCount, req.params.id]); 
         
         res.json({ success: true }); 
-    } catch (err) { 
-        res.status(500).json({ error: 'সার্ভার এরর' }); 
-    } 
+    } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } 
 });
 
 app.get('/api/cutting-lists/:id/:role', async (req, res) => { 
@@ -213,9 +235,7 @@ app.get('/api/cutting-lists/:id/:role', async (req, res) => {
         }
         const result = await pool.query(query, params); 
         res.json({ success: true, data: result.rows }); 
-    } catch (err) { 
-        res.status(500).json({ error: 'সার্ভার এরর' }); 
-    } 
+    } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } 
 });
 
 app.delete('/api/cutting-lists/:id', async (req, res) => { try { await pool.query('DELETE FROM cutting_lists WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
