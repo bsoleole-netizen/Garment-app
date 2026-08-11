@@ -55,6 +55,10 @@ pool.connect(async (err, client, release) => {
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS sewing_start_time TIMESTAMP");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS sewing_end_time TIMESTAMP");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS overtime_hours INT DEFAULT 0");
+
+            // 🛑 নতুন কলাম: শপ অনুযায়ী ক্রমিক নাম্বার সেভ করার জন্য
+            await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS serial_id INT DEFAULT 0");
+
         } catch (e) { console.log("Schema update note:", e.message); }
         release();
     }
@@ -136,21 +140,13 @@ app.post('/api/auth/verify-login', async (req, res) => {
 
 // Super Admin APIs
 app.get('/api/superadmin/admins', async (req, res) => { try { const result = await pool.query(`SELECT m.*, s.shop_name FROM master_admins m LEFT JOIN shops s ON m.id = s.master_admin_id ORDER BY m.id DESC`); res.json({ success: true, data: result.rows }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
-
 app.put('/api/superadmin/update-admin/:id', async (req, res) => { try { await pool.query("UPDATE master_admins SET subscription_status = $1, package_name = $2 WHERE id = $3", [req.body.subscription_status, req.body.package_name, req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
+app.delete('/api/superadmin/delete-admin/:id', async (req, res) => { try { await pool.query('DELETE FROM master_admins WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'এই দোকানের অধীনে ডাটা থাকায় ডিলিট করা সম্ভব নয়। আগে ডাটা ক্লিয়ার করুন।' }); } });
 
-app.delete('/api/superadmin/delete-admin/:id', async (req, res) => {
-    try {
-        await pool.query('DELETE FROM master_admins WHERE id = $1', [req.params.id]);
-        res.json({ success: true });
-    } catch (err) { res.status(500).json({ error: 'এই দোকানের অধীনে ডাটা থাকায় ডিলিট করা সম্ভব নয়। আগে ডাটা ক্লিয়ার করুন।' }); }
-});
-
-// 🛑 ফিক্স ১: সুপার এডমিন প্যানেল থেকে প্যাকেজ অ্যাপ্রুভ করার সম্পূর্ণ অপ্টিমাইজড ও বাগ-ফ্রি কোড
 app.put('/api/superadmin/approve-package/:id', async (req, res) => {
     try {
         const { package_name } = req.body;
-        let days = 30; // Default 1 Month
+        let days = 30; 
         if(package_name && package_name.includes('3 Months')) days = 90;
         if(package_name && package_name.includes('6 Months')) days = 180;
         if(package_name && package_name.includes('1 Year')) days = 365;
@@ -190,17 +186,25 @@ app.put('/api/masteradmin/categories/:id', async (req, res) => { try { await poo
 app.get('/api/categories/:master_admin_id', async (req, res) => { try { const result = await pool.query('SELECT * FROM cutting_categories WHERE master_admin_id::TEXT = $1::TEXT ORDER BY id DESC', [req.params.master_admin_id]); res.json({ success: true, data: result.rows }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.delete('/api/masteradmin/categories/:id', async (req, res) => { try { await pool.query('DELETE FROM cutting_categories WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 
-// Cutting Workflow API
+// ==========================================
+// Cutting Workflow API - 🛑 Shop Specific Serial Update
+// ==========================================
 app.post('/api/user/add-cutting-list', async (req, res) => { 
     try { 
         let userRes = await pool.query('SELECT master_admin_id FROM users WHERE id::TEXT = $1::TEXT', [req.body.user_id]); 
         let masterId = userRes.rows.length > 0 ? userRes.rows[0].master_admin_id : null; 
+        let mIdStr = String(masterId || '');
         
-        await pool.query("INSERT INTO cutting_lists (user_id, master_admin_id, product_code, category_name, raw_text, table_data, fabric_image, status, edit_count) VALUES ($1, $2, $3, $4, $5, $6, $7, 'Cutting', 0)", 
-        [String(req.body.user_id), String(masterId || ''), String(req.body.product_code), String(req.body.category_name || 'N/A'), String(req.body.raw_text), JSON.stringify(req.body.table_data), String(req.body.fabric_image)]); 
+        // 🛑 যে শপ এন্ট্রি দিচ্ছে, তার জন্য অটোমেটিক ১ থেকে শুরু করে সিরিয়াল নাম্বার বের করা
+        let serialRes = await pool.query("SELECT COALESCE(MAX(serial_id), 0) + 1 AS next_serial FROM cutting_lists WHERE master_admin_id = $1", [mIdStr]);
+        let nextSerial = serialRes.rows[0].next_serial;
+
+        await pool.query("INSERT INTO cutting_lists (user_id, master_admin_id, product_code, category_name, raw_text, table_data, fabric_image, status, edit_count, serial_id) VALUES ($1, $2, $3, $4, $5, $6, $7, 'Cutting', 0, $8)", 
+        [String(req.body.user_id), mIdStr, String(req.body.product_code), String(req.body.category_name || 'N/A'), String(req.body.raw_text), JSON.stringify(req.body.table_data), String(req.body.fabric_image), nextSerial]); 
         
         res.status(201).json({ success: true }); 
     } catch (err) { 
+        console.error(err);
         res.status(500).json({ error: 'সার্ভার এরর!' }); 
     } 
 });
