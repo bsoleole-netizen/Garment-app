@@ -15,17 +15,13 @@ const pool = new Pool({
     family: 4 
 });
 
-// SMS Gateway Integration
 const sendSMS = (number, message) => {
     const apiKey = "BmSV2EkMJzPpB266dB4h";
     const senderId = "8809617631352";
     const encodedMsg = encodeURIComponent(message);
     const url = `http://bulksmsbd.net/api/smsapi?api_key=${apiKey}&type=text&number=${number}&senderid=${senderId}&message=${encodedMsg}`;
-    
     http.get(url, (resp) => {
-        let data = '';
-        resp.on('data', chunk => data += chunk);
-        resp.on('end', () => console.log('SMS Sent to', number, 'Response:', data));
+        let data = ''; resp.on('data', chunk => data += chunk); resp.on('end', () => console.log('SMS Sent:', data));
     }).on("error", (err) => console.log("SMS Error: " + err.message));
 };
 
@@ -39,13 +35,15 @@ pool.connect(async (err, client, release) => {
             await client.query(`CREATE TABLE IF NOT EXISTS master_admins (id SERIAL PRIMARY KEY, name VARCHAR(255), phone VARCHAR(50), status VARCHAR(50), subscription_status VARCHAR(50), package_name VARCHAR(255), expire_date TIMESTAMP, pending_package VARCHAR(255), pending_trx_id VARCHAR(255))`);
             await client.query(`CREATE TABLE IF NOT EXISTS shops (id SERIAL PRIMARY KEY, master_admin_id INT, shop_name VARCHAR(255), location VARCHAR(255))`);
             await client.query(`CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, master_admin_id INT, name VARCHAR(255), phone VARCHAR(50))`);
-            await client.query(`CREATE TABLE IF NOT EXISTS cutting_lists (id SERIAL PRIMARY KEY, user_id VARCHAR(255), master_admin_id VARCHAR(255), product_code VARCHAR(255), category_name VARCHAR(255), raw_text TEXT, extra_note TEXT, table_data JSONB, fabric_image TEXT, status VARCHAR(50), edit_count INT DEFAULT 0, sewing_start_time TIMESTAMP, sewing_end_time TIMESTAMP, overtime_hours INT DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+            // 🛑 নতুন: অপারেটর টেবিল
+            await client.query(`CREATE TABLE IF NOT EXISTS operators (id SERIAL PRIMARY KEY, master_admin_id INT, name VARCHAR(255), hourly_salary INT DEFAULT 0)`);
+            await client.query(`CREATE TABLE IF NOT EXISTS cutting_lists (id SERIAL PRIMARY KEY, user_id VARCHAR(255), master_admin_id VARCHAR(255), product_code VARCHAR(255), category_name VARCHAR(255), raw_text TEXT, extra_note TEXT, table_data JSONB, fabric_image TEXT, status VARCHAR(50), edit_count INT DEFAULT 0, sewing_start_time TIMESTAMP, sewing_end_time TIMESTAMP, overtime_hours INT DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, serial_id INT DEFAULT 0, assigned_operators JSONB DEFAULT '[]'::jsonb)`);
             await client.query(`CREATE TABLE IF NOT EXISTS cutting_categories (id SERIAL PRIMARY KEY, master_admin_id TEXT, category_name VARCHAR(255), sizes JSONB, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
             
+            // কলাম আপডেট
             await client.query("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS expire_date TIMESTAMP");
             await client.query("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS pending_package VARCHAR(255)");
             await client.query("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS pending_trx_id VARCHAR(255)");
-            
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'Cutting'");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS product_code VARCHAR(255) DEFAULT 'N/A'");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS category_name VARCHAR(255) DEFAULT 'N/A'");
@@ -55,130 +53,41 @@ pool.connect(async (err, client, release) => {
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS sewing_start_time TIMESTAMP");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS sewing_end_time TIMESTAMP");
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS overtime_hours INT DEFAULT 0");
-
-            // 🛑 নতুন কলাম: শপ অনুযায়ী ক্রমিক নাম্বার সেভ করার জন্য
             await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS serial_id INT DEFAULT 0");
-
+            // 🛑 নতুন কলাম: অ্যাসাইন করা অপারেটরদের লিস্ট
+            await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS assigned_operators JSONB DEFAULT '[]'::jsonb");
         } catch (e) { console.log("Schema update note:", e.message); }
         release();
     }
 });
 
-// OTP & Auth
-app.post('/api/auth/register-step1', async (req, res) => {
-    const { phone } = req.body;
-    let cleanPhone = phone.startsWith('+88') ? phone.substring(3) : phone;
-    let fullPhone = '+88' + cleanPhone;
-    try {
-        const exist = await pool.query('SELECT * FROM master_admins WHERE phone = $1 OR phone = $2', [phone, fullPhone]);
-        if (exist.rows.length > 0) return res.status(400).json({ error: 'এই নম্বর দিয়ে ইতিমধ্যেই অ্যাকাউন্ট রয়েছে!' });
-        const otp = Math.floor(1000 + Math.random() * 9000).toString();
-        otpStore.set(fullPhone, otp);
-        sendSMS(fullPhone, `Your Garments ERP OTP is ${otp}`);
-        res.json({ success: true, message: 'OTP Sent' });
-    } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); }
-});
-
-app.post('/api/auth/register-verify', async (req, res) => {
-    const { name, phone, shop_name, location, otp } = req.body;
-    let cleanPhone = phone.startsWith('+88') ? phone.substring(3) : phone;
-    let fullPhone = '+88' + cleanPhone;
-    const storedOtp = otpStore.get(fullPhone);
-    if (storedOtp !== otp && otp !== '0000') return res.status(400).json({ error: 'ভুল ওটিপি (OTP)!' });
-    otpStore.delete(fullPhone);
-    
-    try {
-        await pool.query('BEGIN');
-        const adminRes = await pool.query("INSERT INTO master_admins (name, phone, status, subscription_status, package_name, expire_date) VALUES ($1, $2, 'Approved', 'Trial', '3 Days Free Trial', NOW() + INTERVAL '3 days') RETURNING *", [name, fullPhone]);
-        await pool.query('INSERT INTO shops (master_admin_id, shop_name, location) VALUES ($1, $2, $3)', [adminRes.rows[0].id, shop_name, location || '']);
-        await pool.query('COMMIT');
-        res.status(201).json({ success: true });
-    } catch (err) { 
-        await pool.query('ROLLBACK'); 
-        res.status(500).json({ error: 'সার্ভার এরর: ডাটা সেভ করা যায়নি!' }); 
-    }
-});
-
-app.post('/api/auth/login-step1', async (req, res) => {
-    const { phone } = req.body;
-    let cleanPhone = phone.startsWith('+88') ? phone.substring(3) : phone;
-    let fullPhone = '+88' + cleanPhone;
-    try {
-        if (cleanPhone === '01773444222' || cleanPhone === '0177344442') {
-            const otp = Math.floor(1000 + Math.random() * 9000).toString();
-            otpStore.set(fullPhone, otp);
-            sendSMS(fullPhone, `Your Garments ERP OTP is ${otp}`);
-            return res.json({ success: true, requiresOtp: true });
-        }
-        let userRes = await pool.query('SELECT * FROM users WHERE phone = $1 OR phone = $2', [phone, fullPhone]);
-        if (userRes.rows.length > 0) return res.json({ success: true, requiresOtp: false, role: 'user', data: userRes.rows[0] });
-        let adminRes = await pool.query(`SELECT * FROM master_admins WHERE phone = $1 OR phone = $2`, [phone, fullPhone]);
-        if (adminRes.rows.length > 0) {
-            const otp = Math.floor(1000 + Math.random() * 9000).toString();
-            otpStore.set(fullPhone, otp);
-            sendSMS(fullPhone, `Your Garments ERP OTP is ${otp}`);
-            return res.json({ success: true, requiresOtp: true });
-        }
-        res.status(404).json({ error: 'অ্যাকাউন্ট পাওয়া যায়নি।' });
-    } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); }
-});
-
-app.post('/api/auth/verify-login', async (req, res) => {
-    const { phone, otp } = req.body;
-    let cleanPhone = phone.startsWith('+88') ? phone.substring(3) : phone;
-    let fullPhone = '+88' + cleanPhone;
-    const storedOtp = otpStore.get(fullPhone);
-    if (storedOtp !== otp && otp !== '0000') return res.status(400).json({ error: 'ভুল ওটিপি (OTP)!' });
-    otpStore.delete(fullPhone);
-    try {
-        if (cleanPhone === '01773444222' || cleanPhone === '0177344442') return res.json({ success: true, role: 'super_admin', data: { id: 0, name: 'Super Admin', phone: fullPhone } });
-        let adminRes = await pool.query(`SELECT m.*, s.shop_name FROM master_admins m LEFT JOIN shops s ON m.id = s.master_admin_id WHERE m.phone = $1 OR m.phone = $2`, [phone, fullPhone]);
-        if (adminRes.rows.length > 0) return res.json({ success: true, role: 'master_admin', data: adminRes.rows[0] });
-        res.status(404).json({ error: 'অ্যাকাউন্ট পাওয়া যায়নি।' });
-    } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); }
-});
+// Auth APIs...
+app.post('/api/auth/register-step1', async (req, res) => { const { phone } = req.body; let cleanPhone = phone.startsWith('+88') ? phone.substring(3) : phone; let fullPhone = '+88' + cleanPhone; try { const exist = await pool.query('SELECT * FROM master_admins WHERE phone = $1 OR phone = $2', [phone, fullPhone]); if (exist.rows.length > 0) return res.status(400).json({ error: 'এই নম্বর দিয়ে ইতিমধ্যেই অ্যাকাউন্ট রয়েছে!' }); const otp = Math.floor(1000 + Math.random() * 9000).toString(); otpStore.set(fullPhone, otp); sendSMS(fullPhone, `Your Garments ERP OTP is ${otp}`); res.json({ success: true, message: 'OTP Sent' }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
+app.post('/api/auth/register-verify', async (req, res) => { const { name, phone, shop_name, location, otp } = req.body; let cleanPhone = phone.startsWith('+88') ? phone.substring(3) : phone; let fullPhone = '+88' + cleanPhone; const storedOtp = otpStore.get(fullPhone); if (storedOtp !== otp && otp !== '0000') return res.status(400).json({ error: 'ভুল ওটিপি!' }); otpStore.delete(fullPhone); try { await pool.query('BEGIN'); const adminRes = await pool.query("INSERT INTO master_admins (name, phone, status, subscription_status, package_name, expire_date) VALUES ($1, $2, 'Approved', 'Trial', '3 Days Free Trial', NOW() + INTERVAL '3 days') RETURNING *", [name, fullPhone]); await pool.query('INSERT INTO shops (master_admin_id, shop_name, location) VALUES ($1, $2, $3)', [adminRes.rows[0].id, shop_name, location || '']); await pool.query('COMMIT'); res.status(201).json({ success: true }); } catch (err) { await pool.query('ROLLBACK'); res.status(500).json({ error: 'সার্ভার এরর' }); } });
+app.post('/api/auth/login-step1', async (req, res) => { const { phone } = req.body; let cleanPhone = phone.startsWith('+88') ? phone.substring(3) : phone; let fullPhone = '+88' + cleanPhone; try { if (cleanPhone === '01773444222' || cleanPhone === '0177344442') { const otp = Math.floor(1000 + Math.random() * 9000).toString(); otpStore.set(fullPhone, otp); sendSMS(fullPhone, `Your Garments ERP OTP is ${otp}`); return res.json({ success: true, requiresOtp: true }); } let userRes = await pool.query('SELECT * FROM users WHERE phone = $1 OR phone = $2', [phone, fullPhone]); if (userRes.rows.length > 0) return res.json({ success: true, requiresOtp: false, role: 'user', data: userRes.rows[0] }); let adminRes = await pool.query(`SELECT * FROM master_admins WHERE phone = $1 OR phone = $2`, [phone, fullPhone]); if (adminRes.rows.length > 0) { const otp = Math.floor(1000 + Math.random() * 9000).toString(); otpStore.set(fullPhone, otp); sendSMS(fullPhone, `Your Garments ERP OTP is ${otp}`); return res.json({ success: true, requiresOtp: true }); } res.status(404).json({ error: 'অ্যাকাউন্ট পাওয়া যায়নি।' }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
+app.post('/api/auth/verify-login', async (req, res) => { const { phone, otp } = req.body; let cleanPhone = phone.startsWith('+88') ? phone.substring(3) : phone; let fullPhone = '+88' + cleanPhone; const storedOtp = otpStore.get(fullPhone); if (storedOtp !== otp && otp !== '0000') return res.status(400).json({ error: 'ভুল ওটিপি!' }); otpStore.delete(fullPhone); try { if (cleanPhone === '01773444222' || cleanPhone === '0177344442') return res.json({ success: true, role: 'super_admin', data: { id: 0, name: 'Super Admin', phone: fullPhone } }); let adminRes = await pool.query(`SELECT m.*, s.shop_name FROM master_admins m LEFT JOIN shops s ON m.id = s.master_admin_id WHERE m.phone = $1 OR m.phone = $2`, [phone, fullPhone]); if (adminRes.rows.length > 0) return res.json({ success: true, role: 'master_admin', data: adminRes.rows[0] }); res.status(404).json({ error: 'অ্যাকাউন্ট পাওয়া যায়নি।' }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 
 // Super Admin APIs
 app.get('/api/superadmin/admins', async (req, res) => { try { const result = await pool.query(`SELECT m.*, s.shop_name FROM master_admins m LEFT JOIN shops s ON m.id = s.master_admin_id ORDER BY m.id DESC`); res.json({ success: true, data: result.rows }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.put('/api/superadmin/update-admin/:id', async (req, res) => { try { await pool.query("UPDATE master_admins SET subscription_status = $1, package_name = $2 WHERE id = $3", [req.body.subscription_status, req.body.package_name, req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
-app.delete('/api/superadmin/delete-admin/:id', async (req, res) => { try { await pool.query('DELETE FROM master_admins WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'এই দোকানের অধীনে ডাটা থাকায় ডিলিট করা সম্ভব নয়। আগে ডাটা ক্লিয়ার করুন।' }); } });
+app.delete('/api/superadmin/delete-admin/:id', async (req, res) => { try { await pool.query('DELETE FROM master_admins WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'এই দোকানের অধীনে ডাটা থাকায় ডিলিট করা সম্ভব নয়।' }); } });
+app.put('/api/superadmin/approve-package/:id', async (req, res) => { try { const { package_name } = req.body; let days = 30; if(package_name && package_name.includes('3 Months')) days = 90; if(package_name && package_name.includes('6 Months')) days = 180; if(package_name && package_name.includes('1 Year')) days = 365; await pool.query(`UPDATE master_admins SET subscription_status = 'Active', package_name = $1, expire_date = GREATEST(COALESCE(expire_date, NOW()::TIMESTAMP), NOW()::TIMESTAMP) + INTERVAL '${days} days', pending_package = NULL, pending_trx_id = NULL WHERE id = $2`, [package_name, req.params.id]); res.json({ success: true }); } catch (e) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 
-app.put('/api/superadmin/approve-package/:id', async (req, res) => {
-    try {
-        const { package_name } = req.body;
-        let days = 30; 
-        if(package_name && package_name.includes('3 Months')) days = 90;
-        if(package_name && package_name.includes('6 Months')) days = 180;
-        if(package_name && package_name.includes('1 Year')) days = 365;
-        
-        const query = `
-            UPDATE master_admins 
-            SET 
-                subscription_status = 'Active', 
-                package_name = $1, 
-                expire_date = GREATEST(COALESCE(expire_date, NOW()::TIMESTAMP), NOW()::TIMESTAMP) + INTERVAL '${days} days', 
-                pending_package = NULL, 
-                pending_trx_id = NULL 
-            WHERE id = $2
-        `;
-        
-        await pool.query(query, [package_name, req.params.id]);
-        res.json({ success: true });
-    } catch (e) { 
-        console.error("Package Approval Error:", e);
-        res.status(500).json({ error: 'সার্ভার এরর: প্যাকেজ অ্যাপ্রুভ করা যায়নি!' }); 
-    }
-});
-
-// Shop / Profile / Packages
+// Shop Profile
 app.put('/api/masteradmin/profile/:id', async (req, res) => { try { await pool.query("UPDATE master_admins SET name = $1, phone = $2 WHERE id = $3", [req.body.name, req.body.phone, req.params.id]); if (req.body.shop_name) await pool.query("UPDATE shops SET shop_name = $1 WHERE master_admin_id = $2", [req.body.shop_name, req.params.id]); res.json({ success: true }); } catch (e) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.post('/api/masteradmin/request-package', async (req, res) => { try { await pool.query("UPDATE master_admins SET pending_package = $1, pending_trx_id = $2 WHERE id = $3", [req.body.package_name, req.body.trx_id, req.body.admin_id]); const shopRes = await pool.query('SELECT shop_name FROM shops WHERE master_admin_id = $1', [req.body.admin_id]); const shopName = shopRes.rows.length > 0 ? shopRes.rows[0].shop_name : 'A Shop'; sendSMS("+8801773444222", `Garments ERP: ${shopName} ordered ${req.body.package_name} package. TrxID: ${req.body.trx_id}`); res.json({ success: true }); } catch (e) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 
-// Users API
+// Users (Cutting Masters) API
 app.post('/api/masteradmin/create-user', async (req, res) => { try { await pool.query('INSERT INTO users (name, phone, master_admin_id) VALUES ($1, $2, $3)', [req.body.name, req.body.phone, req.body.master_admin_id]); res.status(201).json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.get('/api/masteradmin/users/:admin_id', async (req, res) => { try { const result = await pool.query('SELECT * FROM users WHERE master_admin_id::TEXT = $1::TEXT ORDER BY id DESC', [req.params.admin_id]); res.json({ success: true, data: result.rows }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.put('/api/masteradmin/users/:id', async (req, res) => { try { await pool.query('UPDATE users SET name = $1, phone = $2 WHERE id = $3', [req.body.name, req.body.phone, req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
-app.delete('/api/masteradmin/users/:id', async (req, res) => { try { await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'এই ইউজারের অধীনে ডাটা রয়েছে, ডিলিট সম্ভব নয়।' }); } });
+app.delete('/api/masteradmin/users/:id', async (req, res) => { try { await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'ডিলিট সম্ভব নয়।' }); } });
+
+// 🛑 নতুন: Operators (Sewing Operators) API
+app.post('/api/masteradmin/create-operator', async (req, res) => { try { await pool.query('INSERT INTO operators (name, hourly_salary, master_admin_id) VALUES ($1, $2, $3)', [req.body.name, parseInt(req.body.hourly_salary) || 0, req.body.master_admin_id]); res.status(201).json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
+app.get('/api/masteradmin/operators/:admin_id', async (req, res) => { try { const result = await pool.query('SELECT * FROM operators WHERE master_admin_id::TEXT = $1::TEXT ORDER BY id DESC', [req.params.admin_id]); res.json({ success: true, data: result.rows }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
+app.put('/api/masteradmin/operators/:id', async (req, res) => { try { await pool.query('UPDATE operators SET name = $1, hourly_salary = $2 WHERE id = $3', [req.body.name, parseInt(req.body.hourly_salary) || 0, req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
+app.delete('/api/masteradmin/operators/:id', async (req, res) => { try { await pool.query('DELETE FROM operators WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'ডিলিট সম্ভব নয়।' }); } });
 
 // Categories API
 app.post('/api/masteradmin/categories', async (req, res) => { try { const result = await pool.query("INSERT INTO cutting_categories (master_admin_id, category_name, sizes) VALUES ($1, $2, $3) RETURNING *", [String(req.body.master_admin_id), req.body.category_name, JSON.stringify(req.body.sizes)]); res.status(201).json({ success: true, data: result.rows[0] }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
@@ -186,16 +95,12 @@ app.put('/api/masteradmin/categories/:id', async (req, res) => { try { await poo
 app.get('/api/categories/:master_admin_id', async (req, res) => { try { const result = await pool.query('SELECT * FROM cutting_categories WHERE master_admin_id::TEXT = $1::TEXT ORDER BY id DESC', [req.params.master_admin_id]); res.json({ success: true, data: result.rows }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.delete('/api/masteradmin/categories/:id', async (req, res) => { try { await pool.query('DELETE FROM cutting_categories WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 
-// ==========================================
-// Cutting Workflow API - 🛑 Shop Specific Serial Update
-// ==========================================
+// Cutting Workflow API
 app.post('/api/user/add-cutting-list', async (req, res) => { 
     try { 
         let userRes = await pool.query('SELECT master_admin_id FROM users WHERE id::TEXT = $1::TEXT', [req.body.user_id]); 
         let masterId = userRes.rows.length > 0 ? userRes.rows[0].master_admin_id : null; 
         let mIdStr = String(masterId || '');
-        
-        // 🛑 যে শপ এন্ট্রি দিচ্ছে, তার জন্য অটোমেটিক ১ থেকে শুরু করে সিরিয়াল নাম্বার বের করা
         let serialRes = await pool.query("SELECT COALESCE(MAX(serial_id), 0) + 1 AS next_serial FROM cutting_lists WHERE master_admin_id = $1", [mIdStr]);
         let nextSerial = serialRes.rows[0].next_serial;
 
@@ -203,10 +108,7 @@ app.post('/api/user/add-cutting-list', async (req, res) => {
         [String(req.body.user_id), mIdStr, String(req.body.product_code), String(req.body.category_name || 'N/A'), String(req.body.raw_text), JSON.stringify(req.body.table_data), String(req.body.fabric_image), nextSerial]); 
         
         res.status(201).json({ success: true }); 
-    } catch (err) { 
-        console.error(err);
-        res.status(500).json({ error: 'সার্ভার এরর!' }); 
-    } 
+    } catch (err) { res.status(500).json({ error: 'সার্ভার এরর!' }); } 
 });
 
 app.put('/api/user/update-cutting-list/:id', async (req, res) => { 
@@ -216,18 +118,15 @@ app.put('/api/user/update-cutting-list/:id', async (req, res) => {
         let currentCount = check.rows[0].edit_count || 0; 
         if (role === 'user' && currentCount >= 2) return res.status(400).json({ error: 'আপনি সর্বোচ্চ ২ বার আপডেট করতে পারবেন!' }); 
         let newCount = role === 'user' ? currentCount + 1 : currentCount; 
-        
         await pool.query("UPDATE cutting_lists SET product_code = $1, category_name = $2, raw_text = $3, table_data = $4, fabric_image = $5, edit_count = $6 WHERE id = $7", 
         [String(product_code), String(category_name || 'N/A'), String(raw_text), JSON.stringify(table_data), String(fabric_image), newCount, req.params.id]); 
-        
         res.json({ success: true }); 
     } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } 
 });
 
 app.get('/api/cutting-lists/:id/:role', async (req, res) => { 
     try { 
-        let query = '';
-        let params = [];
+        let query = ''; let params = [];
         if (req.params.role === 'super_admin') {
             query = `SELECT c.*, u.name AS cutting_master_name FROM cutting_lists c LEFT JOIN users u ON c.user_id = u.id::TEXT ORDER BY c.id DESC LIMIT 40`;
         } else {
@@ -240,7 +139,22 @@ app.get('/api/cutting-lists/:id/:role', async (req, res) => {
 });
 
 app.delete('/api/cutting-lists/:id', async (req, res) => { try { await pool.query('DELETE FROM cutting_lists WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
-app.post('/api/cutting-lists/update-status', async (req, res) => { const { list_id, status } = req.body; try { if(status === 'Sewing Processing') { await pool.query("UPDATE cutting_lists SET status = $1, sewing_start_time = NOW() WHERE id = $2", [status, list_id]); } else if (status === 'Sewing Complete') { await pool.query("UPDATE cutting_lists SET status = $1, sewing_end_time = NOW() WHERE id = $2", [status, list_id]); } else { await pool.query("UPDATE cutting_lists SET status = $1 WHERE id = $2", [status, list_id]); } res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
+
+// 🛑 আপডেট: স্ট্যাটাস আপডেটের সময় অপারেটর সেভ করার লজিক
+app.post('/api/cutting-lists/update-status', async (req, res) => { 
+    const { list_id, status, assigned_operators } = req.body; 
+    try { 
+        if(status === 'Sewing Processing') { 
+            await pool.query("UPDATE cutting_lists SET status = $1, sewing_start_time = NOW(), assigned_operators = $2 WHERE id = $3", [status, JSON.stringify(assigned_operators || []), list_id]); 
+        } else if (status === 'Sewing Complete') { 
+            await pool.query("UPDATE cutting_lists SET status = $1, sewing_end_time = NOW() WHERE id = $2", [status, list_id]); 
+        } else { 
+            await pool.query("UPDATE cutting_lists SET status = $1 WHERE id = $2", [status, list_id]); 
+        } 
+        res.json({ success: true }); 
+    } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } 
+});
+
 app.post('/api/cutting-lists/add-overtime', async (req, res) => { try { await pool.query("UPDATE cutting_lists SET overtime_hours = COALESCE(overtime_hours, 0) + $1 WHERE id = $2", [parseInt(req.body.hours) || 0, req.body.list_id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 
 const PORT = process.env.PORT || 5000;
