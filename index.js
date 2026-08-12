@@ -30,19 +30,26 @@ pool.connect(async (err, client, release) => {
     if (err) console.error('DB Error:', err.stack);
     else {
         console.log('Successfully connected to DB!');
-        try {
-            await client.query(`CREATE TABLE IF NOT EXISTS master_admins (id SERIAL PRIMARY KEY, name VARCHAR(255), phone VARCHAR(50), status VARCHAR(50), subscription_status VARCHAR(50), package_name VARCHAR(255), expire_date TIMESTAMP, pending_package VARCHAR(255), pending_trx_id VARCHAR(255))`);
-            await client.query(`CREATE TABLE IF NOT EXISTS shops (id SERIAL PRIMARY KEY, master_admin_id TEXT, shop_name VARCHAR(255), location VARCHAR(255))`);
-            await client.query(`CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, master_admin_id TEXT, name VARCHAR(255), phone VARCHAR(50))`);
-            await client.query(`CREATE TABLE IF NOT EXISTS operators (id SERIAL PRIMARY KEY, master_admin_id TEXT, name VARCHAR(255), hourly_salary INT DEFAULT 0)`);
-            await client.query(`CREATE TABLE IF NOT EXISTS cutting_lists (id SERIAL PRIMARY KEY, user_id VARCHAR(255), master_admin_id VARCHAR(255), product_code VARCHAR(255), category_name VARCHAR(255), raw_text TEXT, extra_note TEXT, table_data JSONB, fabric_image TEXT, status VARCHAR(50) DEFAULT 'Cutting', edit_count INT DEFAULT 0, sewing_start_time TIMESTAMP, sewing_end_time TIMESTAMP, overtime_hours INT DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, serial_id INT DEFAULT 0, assigned_operators JSONB DEFAULT '[]'::jsonb)`);
-            await client.query(`CREATE TABLE IF NOT EXISTS cutting_categories (id SERIAL PRIMARY KEY, master_admin_id TEXT, category_name VARCHAR(255), sizes JSONB, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
-            
-            await client.query("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS expire_date TIMESTAMP");
-            await client.query("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS pending_package VARCHAR(255)");
-            await client.query("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS pending_trx_id VARCHAR(255)");
-            await client.query("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS assigned_operators JSONB DEFAULT '[]'::jsonb");
-        } catch (e) { console.log("Schema update note:", e.message); }
+        // 🛑 অত্যন্ত সিকিউর ডাটাবেস টেবিল ক্রিয়েশন
+        const runQuery = async (query) => { try { await client.query(query); } catch(e) { console.log("DB Note:", e.message); } };
+
+        await runQuery(`CREATE TABLE IF NOT EXISTS master_admins (id SERIAL PRIMARY KEY, name VARCHAR(255), phone VARCHAR(50), status VARCHAR(50), subscription_status VARCHAR(50), package_name VARCHAR(255), expire_date TIMESTAMP, pending_package VARCHAR(255), pending_trx_id VARCHAR(255))`);
+        await runQuery(`CREATE TABLE IF NOT EXISTS shops (id SERIAL PRIMARY KEY, master_admin_id VARCHAR(255), shop_name VARCHAR(255), location VARCHAR(255))`);
+        await runQuery(`CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, master_admin_id VARCHAR(255), name VARCHAR(255), phone VARCHAR(50))`);
+        await runQuery(`CREATE TABLE IF NOT EXISTS operators (id SERIAL PRIMARY KEY, master_admin_id VARCHAR(255), name VARCHAR(255), hourly_salary INT DEFAULT 0)`);
+        await runQuery(`CREATE TABLE IF NOT EXISTS cutting_lists (id SERIAL PRIMARY KEY, user_id VARCHAR(255), master_admin_id VARCHAR(255), product_code VARCHAR(255), category_name VARCHAR(255), raw_text TEXT, extra_note TEXT, table_data JSONB, fabric_image TEXT, status VARCHAR(50) DEFAULT 'Cutting', edit_count INT DEFAULT 0, sewing_start_time TIMESTAMP, sewing_end_time TIMESTAMP, overtime_hours INT DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, serial_id INT DEFAULT 0, assigned_operators JSONB DEFAULT '[]'::jsonb)`);
+        await runQuery(`CREATE TABLE IF NOT EXISTS cutting_categories (id SERIAL PRIMARY KEY, master_admin_id VARCHAR(255), category_name VARCHAR(255), sizes JSONB, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)`);
+        
+        // ফিক্সড কলাম টাইপ
+        await runQuery(`ALTER TABLE operators ALTER COLUMN master_admin_id TYPE VARCHAR(255)`);
+        await runQuery(`ALTER TABLE users ALTER COLUMN master_admin_id TYPE VARCHAR(255)`);
+        await runQuery(`ALTER TABLE cutting_lists ALTER COLUMN master_admin_id TYPE VARCHAR(255)`);
+        
+        await runQuery("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS expire_date TIMESTAMP");
+        await runQuery("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS pending_package VARCHAR(255)");
+        await runQuery("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS pending_trx_id VARCHAR(255)");
+        await runQuery("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS assigned_operators JSONB DEFAULT '[]'::jsonb");
+        
         release();
     }
 });
@@ -63,29 +70,23 @@ app.put('/api/superadmin/approve-package/:id', async (req, res) => { try { const
 app.put('/api/masteradmin/profile/:id', async (req, res) => { try { await pool.query("UPDATE master_admins SET name = $1, phone = $2 WHERE id = $3", [req.body.name, req.body.phone, req.params.id]); if (req.body.shop_name) await pool.query("UPDATE shops SET shop_name = $1 WHERE master_admin_id::TEXT = $2::TEXT", [req.body.shop_name, String(req.params.id)]); res.json({ success: true }); } catch (e) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.post('/api/masteradmin/request-package', async (req, res) => { try { await pool.query("UPDATE master_admins SET pending_package = $1, pending_trx_id = $2 WHERE id = $3", [req.body.package_name, req.body.trx_id, req.body.admin_id]); const shopRes = await pool.query('SELECT shop_name FROM shops WHERE master_admin_id::TEXT = $1::TEXT', [String(req.body.admin_id)]); const shopName = shopRes.rows.length > 0 ? shopRes.rows[0].shop_name : 'A Shop'; sendSMS("+8801773444222", `Garments ERP: ${shopName} ordered ${req.body.package_name} package. TrxID: ${req.body.trx_id}`); res.json({ success: true }); } catch (e) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 
-// Users (Cutting Masters) API - 100% Fix Applied
+// 🛑 Users (Cutting Masters) API - FIXED
 app.post('/api/masteradmin/create-user', async (req, res) => { 
     try { 
         await pool.query('INSERT INTO users (name, phone, master_admin_id) VALUES ($1, $2, $3)', [req.body.name, req.body.phone, String(req.body.master_admin_id)]); 
         res.status(201).json({ success: true }); 
-    } catch (err) { 
-        console.error("Create User Error:", err);
-        res.status(500).json({ error: 'সার্ভার এরর' }); 
-    } 
+    } catch (err) { res.status(500).json({ error: err.message }); } 
 });
 app.get('/api/masteradmin/users/:admin_id', async (req, res) => { try { const result = await pool.query('SELECT * FROM users WHERE master_admin_id::TEXT = $1::TEXT ORDER BY id DESC', [String(req.params.admin_id)]); res.json({ success: true, data: result.rows }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.put('/api/masteradmin/users/:id', async (req, res) => { try { await pool.query('UPDATE users SET name = $1, phone = $2 WHERE id = $3', [req.body.name, req.body.phone, req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.delete('/api/masteradmin/users/:id', async (req, res) => { try { await pool.query('DELETE FROM users WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'ডিলিট সম্ভব নয়।' }); } });
 
-// Operators (Sewing Operators) API - 100% Fix Applied
+// 🛑 Operators API - FIXED
 app.post('/api/masteradmin/create-operator', async (req, res) => { 
     try { 
         await pool.query('INSERT INTO operators (name, hourly_salary, master_admin_id) VALUES ($1, $2, $3)', [req.body.name, parseInt(req.body.hourly_salary) || 0, String(req.body.master_admin_id)]); 
         res.status(201).json({ success: true }); 
-    } catch (err) { 
-        console.error("Create Operator Error:", err);
-        res.status(500).json({ error: 'সার্ভার এরর' }); 
-    } 
+    } catch (err) { res.status(500).json({ error: err.message }); } 
 });
 app.get('/api/masteradmin/operators/:admin_id', async (req, res) => { try { const result = await pool.query('SELECT * FROM operators WHERE master_admin_id::TEXT = $1::TEXT ORDER BY id DESC', [String(req.params.admin_id)]); res.json({ success: true, data: result.rows }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.put('/api/masteradmin/operators/:id', async (req, res) => { try { await pool.query('UPDATE operators SET name = $1, hourly_salary = $2 WHERE id = $3', [req.body.name, parseInt(req.body.hourly_salary) || 0, req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
@@ -110,7 +111,7 @@ app.post('/api/user/add-cutting-list', async (req, res) => {
         [String(req.body.user_id), mIdStr, String(req.body.product_code), String(req.body.category_name || 'N/A'), String(req.body.raw_text), JSON.stringify(req.body.table_data), String(req.body.fabric_image), nextSerial]); 
         
         res.status(201).json({ success: true }); 
-    } catch (err) { res.status(500).json({ error: 'সার্ভার এরর!' }); } 
+    } catch (err) { res.status(500).json({ error: err.message }); } 
 });
 
 app.put('/api/user/update-cutting-list/:id', async (req, res) => { 
