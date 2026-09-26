@@ -55,7 +55,7 @@ pool.connect(async (err, client, release) => {
     }
 });
 
-// 🛑 Render সার্ভার সজাগ রাখার জন্য Ping API
+// Render সার্ভার সজাগ রাখার জন্য Ping API
 app.get('/api/ping', (req, res) => {
     res.status(200).json({ success: true, message: 'Server is awake!' });
 });
@@ -147,7 +147,7 @@ app.put('/api/user/update-cutting-list/:id', async (req, res) => {
     } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } 
 });
 
-// 🛑 Fix: Removed "LIMIT 40" so all data is fetched for the app's sorting logic
+// LIMIT 40 রিমুভ করা আছে যেন কোনো ডাটা মিস না হয়
 app.get('/api/cutting-lists/:id/:role', async (req, res) => { 
     try { 
         let query = ''; let params = [];
