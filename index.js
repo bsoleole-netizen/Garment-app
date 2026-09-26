@@ -47,9 +47,7 @@ pool.connect(async (err, client, release) => {
         await runQuery("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS pending_package VARCHAR(255)");
         await runQuery("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS pending_trx_id VARCHAR(255)");
         
-        // 🛑 নতুন: অপারেটর ও কস্টিং ফিচার অন/অফ করার ফিল্ড
         await runQuery("ALTER TABLE master_admins ADD COLUMN IF NOT EXISTS is_operator_enabled BOOLEAN DEFAULT TRUE");
-
         await runQuery("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS assigned_operators JSONB DEFAULT '[]'::jsonb");
         await runQuery("ALTER TABLE cutting_lists ADD COLUMN IF NOT EXISTS accumulated_minutes INT DEFAULT 0");
         
@@ -57,10 +55,14 @@ pool.connect(async (err, client, release) => {
     }
 });
 
+// 🛑 Render সার্ভার সজাগ রাখার জন্য Ping API
+app.get('/api/ping', (req, res) => {
+    res.status(200).json({ success: true, message: 'Server is awake!' });
+});
+
 app.post('/api/auth/register-step1', async (req, res) => { const { phone } = req.body; let cleanPhone = phone.startsWith('+88') ? phone.substring(3) : phone; let fullPhone = '+88' + cleanPhone; try { const exist = await pool.query('SELECT * FROM master_admins WHERE phone = $1 OR phone = $2', [phone, fullPhone]); if (exist.rows.length > 0) return res.status(400).json({ error: 'এই নম্বর দিয়ে ইতিমধ্যেই অ্যাকাউন্ট রয়েছে!' }); const otp = Math.floor(1000 + Math.random() * 9000).toString(); otpStore.set(fullPhone, otp); sendSMS(fullPhone, `Your Garments ERP OTP is ${otp}`); res.json({ success: true, message: 'OTP Sent' }); } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 app.post('/api/auth/register-verify', async (req, res) => { const { name, phone, shop_name, location, otp } = req.body; let cleanPhone = phone.startsWith('+88') ? phone.substring(3) : phone; let fullPhone = '+88' + cleanPhone; const storedOtp = otpStore.get(fullPhone); if (storedOtp !== otp && otp !== '0000') return res.status(400).json({ error: 'ভুল ওটিপি!' }); otpStore.delete(fullPhone); try { await pool.query('BEGIN'); const adminRes = await pool.query("INSERT INTO master_admins (name, phone, status, subscription_status, package_name, expire_date) VALUES ($1, $2, 'Approved', 'Trial', '3 Days Free Trial', NOW() + INTERVAL '3 days') RETURNING *", [name, fullPhone]); await pool.query('INSERT INTO shops (master_admin_id, shop_name, location) VALUES ($1, $2, $3)', [String(adminRes.rows[0].id), shop_name, location || '']); await pool.query('COMMIT'); res.status(201).json({ success: true }); } catch (err) { await pool.query('ROLLBACK'); res.status(500).json({ error: 'সার্ভার এরর' }); } });
 
-// 🛑 Login API Update: Users will now fetch their Master Admin's feature status
 app.post('/api/auth/login-step1', async (req, res) => { 
     const { phone } = req.body; let cleanPhone = phone.startsWith('+88') ? phone.substring(3) : phone; let fullPhone = '+88' + cleanPhone; 
     try { 
@@ -92,7 +94,6 @@ app.put('/api/superadmin/update-admin/:id', async (req, res) => { try { await po
 app.delete('/api/superadmin/delete-admin/:id', async (req, res) => { try { await pool.query('DELETE FROM master_admins WHERE id = $1', [req.params.id]); res.json({ success: true }); } catch (err) { res.status(500).json({ error: 'এই দোকানের অধীনে ডাটা থাকায় ডিলিট করা সম্ভব নয়।' }); } });
 app.put('/api/superadmin/approve-package/:id', async (req, res) => { try { const { package_name } = req.body; let days = 30; if(package_name && package_name.includes('3 Months')) days = 90; if(package_name && package_name.includes('6 Months')) days = 180; if(package_name && package_name.includes('1 Year')) days = 365; await pool.query(`UPDATE master_admins SET subscription_status = 'Active', package_name = $1, expire_date = GREATEST(COALESCE(expire_date, NOW()::TIMESTAMP), NOW()::TIMESTAMP) + INTERVAL '${days} days', pending_package = NULL, pending_trx_id = NULL WHERE id = $2`, [package_name, req.params.id]); res.json({ success: true }); } catch (e) { res.status(500).json({ error: 'সার্ভার এরর' }); } });
 
-// 🛑 Shop Profile Update
 app.put('/api/masteradmin/profile/:id', async (req, res) => { 
     try { 
         await pool.query("UPDATE master_admins SET name = $1, phone = $2, is_operator_enabled = $3 WHERE id = $4", [req.body.name, req.body.phone, req.body.is_operator_enabled, req.params.id]); 
@@ -146,13 +147,14 @@ app.put('/api/user/update-cutting-list/:id', async (req, res) => {
     } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } 
 });
 
+// 🛑 Fix: Removed "LIMIT 40" so all data is fetched for the app's sorting logic
 app.get('/api/cutting-lists/:id/:role', async (req, res) => { 
     try { 
         let query = ''; let params = [];
         if (req.params.role === 'super_admin') {
-            query = `SELECT c.*, u.name AS cutting_master_name FROM cutting_lists c LEFT JOIN users u ON c.user_id::TEXT = u.id::TEXT ORDER BY c.id DESC LIMIT 40`;
+            query = `SELECT c.*, u.name AS cutting_master_name FROM cutting_lists c LEFT JOIN users u ON c.user_id::TEXT = u.id::TEXT ORDER BY c.id DESC`;
         } else {
-            query = `SELECT c.*, u.name AS cutting_master_name FROM cutting_lists c LEFT JOIN users u ON c.user_id::TEXT = u.id::TEXT WHERE c.master_admin_id::TEXT = $1::TEXT ORDER BY c.id DESC LIMIT 40`;
+            query = `SELECT c.*, u.name AS cutting_master_name FROM cutting_lists c LEFT JOIN users u ON c.user_id::TEXT = u.id::TEXT WHERE c.master_admin_id::TEXT = $1::TEXT ORDER BY c.id DESC`;
             params = [String(req.params.id)];
         }
         const result = await pool.query(query, params); 
