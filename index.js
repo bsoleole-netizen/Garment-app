@@ -7,6 +7,8 @@ require('dotenv').config();
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+// 🛑 আপডেট: URL-Encoded বডির জন্য লিমিট সেট করা হলো
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 const pool = new Pool({ 
     connectionString: process.env.DATABASE_URL, 
@@ -147,7 +149,6 @@ app.put('/api/user/update-cutting-list/:id', async (req, res) => {
     } catch (err) { res.status(500).json({ error: 'সার্ভার এরর' }); } 
 });
 
-// LIMIT 40 রিমুভ করা আছে যেন কোনো ডাটা মিস না হয়
 app.get('/api/cutting-lists/:id/:role', async (req, res) => { 
     try { 
         let query = ''; let params = [];
